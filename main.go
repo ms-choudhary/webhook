@@ -166,7 +166,7 @@ func (s *Server) webhookHandler(w http.ResponseWriter, req *http.Request) {
 	entry = fmt.Sprintf("%s - [Karakeep](https://bookmarks.mschoudhary.site/dashboard/preview/%s)", entry, bookmark.ID)
 
 	createNodeReq := CreateNodeRequest{
-		ParentID: "testlist",
+		ParentID: "inboxkarakeep",
 		Name:     entry,
 		Position: "top",
 	}
