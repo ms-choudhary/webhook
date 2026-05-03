@@ -13,6 +13,7 @@ import (
 type Server struct {
 	kkClient *KarakeepClient
 	wfClient *WorkflowyClient
+	errors   []string
 }
 
 type WorkflowyClient struct {
@@ -128,6 +129,14 @@ func (kc *KarakeepClient) getBookmark(id string) (*KarakeepBookmark, error) {
 	return &bookmark, nil
 }
 
+func (s *Server) writeError(w http.ResponseWriter, err error) {
+	s.errors = append(s.errors, err.Error())
+
+	log.Printf("err: %v", err)
+	//w.WriteHeader(http.StatusInternalServerError)
+	//fmt.Fprintf(w, "{\"error\": \"%v\"}", err)
+}
+
 func (s *Server) webhookHandler(w http.ResponseWriter, req *http.Request) {
 	defer req.Body.Close()
 
@@ -136,15 +145,13 @@ func (s *Server) webhookHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if err := json.NewDecoder(req.Body).Decode(&webhookReq); err != nil {
-		log.Printf("error decoding webhook request: %v", err)
-		fmt.Fprintf(w, "{\"error\": \"%v\"}", err)
+		s.writeError(w, fmt.Errorf("error decoding webhook request: %v", err))
 		return
 	}
 
 	bookmark, err := s.kkClient.getBookmark(webhookReq.BookmarkID)
 	if err != nil {
-		log.Printf("err getting bookmark: %v", err)
-		fmt.Fprintf(w, "{\"error\": \"%v\"}", err)
+		s.writeError(w, fmt.Errorf("[https://bookmarks.mschoudhary.site/dashboard/preview/%s] error getting bookmark: %v", webhookReq.BookmarkID, err))
 		return
 	}
 
@@ -172,15 +179,21 @@ func (s *Server) webhookHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if err := s.wfClient.CreateNode(createNodeReq); err != nil {
-		log.Fatalf("failed to create node: %v", err)
+		s.writeError(w, fmt.Errorf("[https://bookmarks.mschoudhary.site/dashboard/preview/%s] error creating wf_node: %v", webhookReq.BookmarkID, err))
+		return
 	}
 
 	log.Print("wf node created")
 	json.NewEncoder(w).Encode(map[string]string{"status": "wf_node_created"})
 }
 
-func healthHandler(w http.ResponseWriter, req *http.Request) {
-	fmt.Fprintf(w, "{\"status\": \"ok\"}")
+func (s *Server) healthHandler(w http.ResponseWriter, req *http.Request) {
+	if len(s.errors) != 0 {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string][]string{"errors": s.errors})
+	} else {
+		fmt.Fprintf(w, "{\"status\": \"ok\"}")
+	}
 }
 
 func main() {
@@ -195,7 +208,7 @@ func main() {
 		},
 	}
 
-	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/health", server.healthHandler)
 	http.Handle("/webhook", logMiddleware(http.HandlerFunc(server.webhookHandler)))
 	log.Print("listening on 8090 ...")
 	log.Fatal(http.ListenAndServe(":8090", nil))
