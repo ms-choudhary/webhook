@@ -179,6 +179,10 @@ func (s *Server) webhookHandler(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "wf_node_created"})
 }
 
+func healthHandler(w http.ResponseWriter, req *http.Request) {
+	fmt.Fprintf(w, "{\"status\": \"ok\"}")
+}
+
 func main() {
 	server := &Server{
 		kkClient: &KarakeepClient{
@@ -191,6 +195,7 @@ func main() {
 		},
 	}
 
+	http.HandleFunc("/health", healthHandler)
 	http.Handle("/webhook", logMiddleware(http.HandlerFunc(server.webhookHandler)))
 	log.Print("listening on 8090 ...")
 	log.Fatal(http.ListenAndServe(":8090", nil))

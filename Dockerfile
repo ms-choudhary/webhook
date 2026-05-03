@@ -7,14 +7,14 @@ WORKDIR /app
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o ./gmail2gullak .
+RUN CGO_ENABLED=0 GOOS=linux go build -o ./webhook .
 
 FROM alpine:3.14
 
 WORKDIR /app
 
-COPY --from=builder /app/karakeep-workflowy-integration /usr/local/bin/karakeep-workflowy-integration
+COPY --from=builder /app/webhook /usr/local/bin/webhook
 
 EXPOSE 8090
 
-CMD ["karakeep-workflowy-integration"]
+CMD ["webhook"]
