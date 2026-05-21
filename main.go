@@ -3,11 +3,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
+	"strings"
 )
 
 type Server struct {
@@ -17,8 +21,9 @@ type Server struct {
 }
 
 type WorkflowyClient struct {
-	URL    string
-	APIKey string
+	URL      string
+	APIKey   string
+	Disabled bool
 }
 
 type CreateNodeRequest struct {
@@ -28,8 +33,9 @@ type CreateNodeRequest struct {
 }
 
 type KarakeepClient struct {
-	URL    string
-	APIKey string
+	URL      string
+	APIKey   string
+	Disabled bool
 }
 
 type KarakeepBookmark struct {
@@ -49,6 +55,10 @@ func (b KarakeepBookmark) String() string {
 }
 
 func (wf *WorkflowyClient) CreateNode(req CreateNodeRequest) error {
+	if wf.Disabled {
+		return nil
+	}
+
 	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
@@ -97,6 +107,11 @@ func logMiddleware(next http.Handler) http.Handler {
 }
 
 func (kc *KarakeepClient) getBookmark(id string) (*KarakeepBookmark, error) {
+	if kc.Disabled {
+		// return dummy response for testing
+		return &KarakeepBookmark{ID: "dummyid", Title: "dummy", Content: BookmarkContent{Type: "link"}}, nil
+	}
+
 	httpReq, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/bookmarks/%s", kc.URL, id), nil)
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP request: %w", err)
@@ -137,40 +152,74 @@ func (s *Server) writeError(w http.ResponseWriter, err error) {
 	//fmt.Fprintf(w, "{\"error\": \"%v\"}", err)
 }
 
-func (s *Server) webhookHandler(w http.ResponseWriter, req *http.Request) {
+func getFileName(link string) string {
+	parsed, err := url.Parse(link)
+	if err != nil {
+		return "missing_filename"
+	}
+
+	name, err := url.PathUnescape(path.Base(parsed.Path))
+	if err != nil {
+		return "missing_filename"
+	}
+
+	return name
+}
+
+func (s *Server) karakeepHandler(w http.ResponseWriter, req *http.Request) {
 	defer req.Body.Close()
 
 	var webhookReq struct {
+		Type       string `json:"type"`
 		BookmarkID string `json:"bookmarkId"`
+		Operation  string `json:"operation"`
+		URL        string `json:"url"`
 	}
 
-	if err := json.NewDecoder(req.Body).Decode(&webhookReq); err != nil {
+	data, err := io.ReadAll(req.Body)
+	if err != nil {
+		s.writeError(w, fmt.Errorf("error reading request body: %v", err))
+		return
+	}
+	log.Printf("webhook request: %v", string(data))
+
+	if err := json.Unmarshal(data, &webhookReq); err != nil {
 		s.writeError(w, fmt.Errorf("error decoding webhook request: %v", err))
 		return
 	}
 
-	bookmark, err := s.kkClient.getBookmark(webhookReq.BookmarkID)
-	if err != nil {
-		s.writeError(w, fmt.Errorf("[https://bookmarks.mschoudhary.site/dashboard/preview/%s] error getting bookmark: %v", webhookReq.BookmarkID, err))
+	var entry string
+	if webhookReq.Operation == "created" {
+		if strings.Contains(webhookReq.URL, "pdf") {
+			entry = fmt.Sprintf("%s - [Karakeep](karakeep://dashboard/bookmarks/%s)", getFileName(webhookReq.URL), webhookReq.BookmarkID)
+		} else if webhookReq.Type == "asset" {
+			entry = fmt.Sprintf("untitled.pdf - [Karakeep](karakeep://dashboard/bookmarks/%s)", webhookReq.BookmarkID)
+		} else {
+			log.Printf("skipping request")
+			return
+		}
+	} else if webhookReq.Operation == "crawled" {
+		bookmark, err := s.kkClient.getBookmark(webhookReq.BookmarkID)
+		if err != nil {
+			s.writeError(w, fmt.Errorf("[https://bookmarks.mschoudhary.site/dashboard/preview/%s] error getting bookmark: %v", webhookReq.BookmarkID, err))
+			return
+		}
+
+		log.Printf("bookmark: %v", bookmark)
+
+		if bookmark.Title != "" {
+			entry = bookmark.Title
+		} else if bookmark.Content.Title != "" {
+			entry = bookmark.Content.Title
+		} else {
+			entry = "Untitled"
+		}
+
+		entry = fmt.Sprintf("%s - [Link](%s) - [Karakeep](karakeep://dashboard/bookmarks/%s)", entry, webhookReq.URL, webhookReq.BookmarkID)
+	} else {
+		log.Printf("skipping request")
 		return
 	}
-
-	log.Printf("bookmark: %v", bookmark)
-
-	var entry string
-	if bookmark.Title != "" {
-		entry = bookmark.Title
-	} else if bookmark.Content.Title != "" {
-		entry = bookmark.Content.Title
-	} else {
-		entry = "Untitled"
-	}
-
-	if bookmark.Content.Type == "link" {
-		entry = fmt.Sprintf("%s - [Link](%s)", entry, bookmark.Content.URL)
-	}
-
-	entry = fmt.Sprintf("%s - [Karakeep](https://bookmarks.mschoudhary.site/dashboard/preview/%s)", entry, bookmark.ID)
 
 	createNodeReq := CreateNodeRequest{
 		ParentID: "inboxkarakeep",
@@ -183,7 +232,7 @@ func (s *Server) webhookHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	log.Print("wf node created")
+	log.Printf("wf node created, entry: %s", entry)
 	json.NewEncoder(w).Encode(map[string]string{"status": "wf_node_created"})
 }
 
@@ -197,19 +246,28 @@ func (s *Server) healthHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 func main() {
+	testmode := flag.Bool("test", false, "Run in test mode")
+	flag.Parse()
+
 	server := &Server{
 		kkClient: &KarakeepClient{
-			URL:    "https://bookmarks.mschoudhary.site",
-			APIKey: getEnvOrFatal("KARAKEEP_API_KEY"),
+			URL: "https://bookmarks.mschoudhary.site",
 		},
 		wfClient: &WorkflowyClient{
-			URL:    "https://workflowy.com",
-			APIKey: getEnvOrFatal("WORKFLOWY_API_KEY"),
+			URL: "https://workflowy.com",
 		},
 	}
 
+	if *testmode {
+		server.kkClient.Disabled = true
+		server.wfClient.Disabled = true
+	} else {
+		server.kkClient.APIKey = getEnvOrFatal("KARAKEEP_API_KEY")
+		server.wfClient.APIKey = getEnvOrFatal("WORKFLOWY_API_KEY")
+	}
+
 	http.HandleFunc("/health", server.healthHandler)
-	http.Handle("/webhook", logMiddleware(http.HandlerFunc(server.webhookHandler)))
+	http.Handle("/karakeep", logMiddleware(http.HandlerFunc(server.karakeepHandler)))
 	log.Print("listening on 8090 ...")
 	log.Fatal(http.ListenAndServe(":8090", nil))
 }
