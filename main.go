@@ -166,6 +166,15 @@ func getFileName(link string) string {
 	return name
 }
 
+func isContentTypePDF(link string) bool {
+	resp, err := http.Head(link)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return strings.HasPrefix(resp.Header.Get("Content-Type"), "application/pdf")
+}
+
 func (s *Server) karakeepHandler(w http.ResponseWriter, req *http.Request) {
 	defer req.Body.Close()
 
@@ -190,7 +199,7 @@ func (s *Server) karakeepHandler(w http.ResponseWriter, req *http.Request) {
 
 	var entry string
 	if webhookReq.Operation == "created" {
-		if strings.Contains(webhookReq.URL, "pdf") {
+		if isContentTypePDF(webhookReq.URL) {
 			entry = fmt.Sprintf("%s - [Karakeep](karakeep://dashboard/bookmarks/%s)", getFileName(webhookReq.URL), webhookReq.BookmarkID)
 		} else if webhookReq.Type == "asset" {
 			entry = fmt.Sprintf("untitled.pdf - [Karakeep](karakeep://dashboard/bookmarks/%s)", webhookReq.BookmarkID)
